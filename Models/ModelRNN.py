@@ -93,7 +93,7 @@ class CaptionNet(nn.Module):
             else:
                 sent = torch.cat((sent, x.unsqueeze(1)), dim=1)
 
-            out = torch.tensor([]).to(device)
+            out = torch.tensor([]).to(device)#
             hid_ix = [hidden]
             c_ix = [c]
             for captions in range(len(sent)):
