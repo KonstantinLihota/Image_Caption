@@ -15,23 +15,17 @@ class CaptionNet(nn.Module):
         embedding_dim: размернсть эмбединга 
         n_layers количество слоев в rnn сети
         '''
+
         self.dropout = nn.Dropout(p=dropout)
         self.relu = nn.ReLU()
         self.embedding_dim = embedding_dim
-
-        self.init_h = nn.Sequential( # cлой для инициализации hidden state rnn сети
-            nn.Linear(cnn_feature_size, hidden_dim * 2),
-            self.dropout,
-            self.relu,
-            nn.Linear(hidden_dim * 2, hidden_dim),
+        self.init_h = nn.Sequential(# cлой для инициализации hidden state rnn сети
+            nn.Linear(cnn_feature_size, hidden_dim),
             self.dropout,
             self.relu)
+        self.init_c = nn.Sequential(# cлой для инициализации с state rnn сети
+            nn.Linear(cnn_feature_size, hidden_dim),
 
-        self.init_c = nn.Sequential(
-            nn.Linear(cnn_feature_size, hidden_dim * 2),
-            self.dropout,
-            self.relu,
-            nn.Linear(hidden_dim * 2, hidden_dim),
             self.dropout,
             self.relu)
 
@@ -40,12 +34,12 @@ class CaptionNet(nn.Module):
 
         self.rnn = nn.LSTM(embedding_dim, hidden_dim, num_layers=n_layers, dropout=dropout, bidirectional=bidirectional)
 
-        # self.init_h = nn.Linear(cnn_feature_size, hidden_dim)  # linear layer to find initial hidden state of LSTMCell
-        # self.init_c = nn.Linear(cnn_feature_size, hidden_dim)   # linear layer to find initial cell state of LSTMCell
-        # self.f_beta = nn.Linear(hidden_dim, cnn_feature_size)  # linear layer to create a sigmoid-activated gate
+        self.n_layers = n_layers
 
+        self.bidirectional = bidirectional
+        self.hidden_dim = hidden_dim
         self.sigmoid = nn.Sigmoid()
-        self.fc = nn.Linear(2 * hidden_dim, vocab_size)  # посчитать длину словаря
+        self.fc = nn.Linear(2 * hidden_dim, vocab_size)
         self.init_weights()
 
     def init_weights(self):
@@ -70,36 +64,46 @@ class CaptionNet(nn.Module):
         image_vectors:  эмбединг картинки
         caption_ix:  тензор с несколькими описаниями картинки
         """
-        # batch_size = image_vectors.size(0)
-        # размер батча
-        # vocab_size = self.vocab_size
+        batch_size = image_vectors.size(0)  # размер батча
 
         image_vectors = image_vectors.to(device)
+
         captions_ix = captions_ix.to(device)
-        hidden, c = self.init_hidden_state(image_vectors) #инициализация скрытых состояний
 
-        hidden = hidden.unsqueeze(0).repeat(captions_ix.size(1) - 1, 1, 1)
-        c = c.unsqueeze(0).repeat(captions_ix.size(1) - 1, 1, 1)
+        hidden, c = self.init_hidden_state(image_vectors)
 
-        sent = torch.tensor([]).to(device) # sent содержит сгенирированые о
-                                           # писания на i том шаге по предложению
-        output = torch.tensor([]).to(device)
+        if self.bidirectional == True: # в случае bidirectional == True используется выход модели
+            count = 2
+        else:
+            count = 1
 
-        for word in captions_ix.permute(2, 1, 0):   # Для каждого слова из описания генерируем следующее слово
-            x = self.embedding(word)
+        hidden = hidden.unsqueeze(0).repeat(count * self.n_layers, 1, 1)
+        c = c.unsqueeze(0).repeat(count * self.n_layers, 1, 1)
 
-            if sent.size() == 0:
-                sent = x.unsqueeze(1)
-            else:
-                sent = torch.cat((sent, x.unsqueeze(1)), dim=1)
+        output = torch.zeros(captions_ix.shape[1], captions_ix.shape[2],# [Count_sent,N_word, batch_size, 2*embeding_dim]
+                             batch_size, count * self.hidden_dim).to(device)
 
-            out = torch.tensor([]).to(device)#
-            hid_ix = [hidden]
-            c_ix = [c]
-            for captions in range(len(sent)):
-                packed_output, (hidden, c) = self.rnn(sent[captions], (hid_ix[captions], c_ix[captions]))
-                hid_ix.append(hidden)
-                c_ix.append(c)
+        captions_ix = captions_ix.permute(2, 1, 0)
+
+        hid_ix = hidden.unsqueeze(0).repeat(captions_ix.shape[1], 1, 1, 1)  # [Count_sent,N_layers*ciunt, batch_size, embeding_dim]
+        c_ix = c.unsqueeze(0).repeat(captions_ix.shape[1], 1, 1, 1)  # [Count_sent,N_layers*ciunt, batch_size, embeding_dim]
+
+        sent_emb = self.embedding(captions_ix) # получаем эмбединги предложений
+        for word in range(len(captions_ix)):
+
+            sent = sent_emb[:word + 1]  # [Count_word,Count_sent, batch_size, embeding_dim]
+
+            out = torch.tensor([]).to(device)
+
+            sent = sent.permute(1, 0, 2, 3)
+            for captions in range(len(sent)):  # sent - [Cunt_sent, N_word, batch_size, embeding_dim]
+
+                _, (hidden, c) = self.rnn(sent[captions], (hid_ix[captions], c_ix[captions]))
+
+                packed_output = torch.cat((hidden[-1], hidden[-2]), dim=1)
+
+                hid_ix[captions] = hidden
+                c_ix[captions] = c
 
                 if out.size(0) == 0:
                     out = packed_output.unsqueeze(0)
@@ -107,10 +111,11 @@ class CaptionNet(nn.Module):
 
                     out = torch.cat((out, packed_output.unsqueeze(0)), dim=0)
 
-        # 1. инициализируем LSTM state
-        # 2. применим слой эмбеддингов к image_vectors
-        # 3. скормим LSTM captions_emb
-        # 4. посчитаем логиты из выхода LSTM
-        logits = self.fc(torch.tensor(out))
+            output[:, word] = out
+
+
+        logits = self.fc(torch.tensor(output))  # посмотреть размерность hidden
 
         return logits
+
+
